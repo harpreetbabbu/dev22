@@ -1,79 +1,107 @@
 import streamlit as st
+import plotly.express as px
 import pandas as pd
-import plotly.graph_objects as go
 import requests
-import time
+from streamlit_autorefresh import st_autorefresh
 
-# पेज की सेटिंग
-st.set_page_config(page_title="Dev 22 - Live Order Flow Analyzer", layout="wide")
+# पेज की सेटिंग (चौड़ा लेआउट)
+st.set_page_config(
+    page_title="Order Flow Terminal - Dev 22",
+    page_icon="📈",
+    layout="wide"
+)
 
-st.markdown("""
-    <h1 style='text-align: center; color: #00FFA3;'>🚀 Dev 22 - Live Order Flow & Targets Analyzer</h1>
-""", unsafe_allow_html=True)
+# ---------------------------------------------------------
+# ऑटो-रिफ्रेश सेटअप (हर 5 सेकंड यानी 5000 मिलीसेकंड में पेज रिफ्रेश होगा)
+# ---------------------------------------------------------
+st_autorefresh(interval=5000, limit=None, key="orderflow_autorefresh")
 
-# कॉइनथिको (CoinGecko) पब्लिक एपीआई से डेटा फेच करने का फंक्शन (जो क्लाउड पर ब्लॉक नहीं होता)
-@st.cache_data(ttl=10)
-def get_crypto_data():
+# ---------------------------------------------------------
+# डेटा फेचिंग फंक्शन (बाइनेंस से लाइव डेटा लाने के लिए)
+# ---------------------------------------------------------
+@st.cache_data(ttl=3) # हर 3 सेकंड में नया डेटा कैश क्लियर करेगा
+def fetch_binance_data():
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()['bitcoin']
-            # चूंकि कॉइनथिको फ्री एपीआई में हाई/लो कभी-कभी नहीं आता, इसलिए हम उसे मैनेज कर लेंगे
-            price = float(data['usd'])
-            change = float(data['usd_24h_change'])
-            volume = float(data.get('usd_24h_vol', price * 1200)) # बैकअप वॉल्यूम
-            return {
-                "price": price,
-                "high": price * 1.015, # एप्रोक्सीमेट सेफ रेंज
-                "low": price * 0.985,
-                "volume": volume / price, # बीटीसी वॉल्यूम में कन्वर्ट
-                "price_change": change
-            }
+        # बाइनेंस से बीटीसी टिकर प्राइस लेना
+        ticker_res = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=5).json()
+        current_price = float(ticker_res.get('lastPrice', 67200))
+        high_price = float(ticker_res.get('highPrice', 68100))
+        low_price = float(ticker_res.get('lowPrice', 66500))
+        volume = float(ticker_res.get('volume', 35420.50))
+        
+        # बाइनेंस से ऑर्डर बुक डेप्थ (Orderbook Depth) लेना
+        depth_res = requests.get("https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=7", timeout=5).json()
+        bids = depth_res.get('bids', [])
+        asks = depth_res.get('asks', [])
+        
+        return current_price, high_price, low_price, volume, bids, asks
     except Exception as e:
-        pass
+        # अगर इंटरनेट या API में दिक्कत हो, तो डिफ़ॉल्ट वैल्यू दिखाएगा ताकि ऐप क्रैश न हो
+        return 67200.0, 68100.0, 66500.0, 35420.50, [], []
+
+# डेटा लोड करें
+price, high, low, vol, bids, asks = fetch_binance_data()
+
+# ---------------------------------------------------------
+# टॉप मेट्रिक्स (Top Metrics Header)
+# ---------------------------------------------------------
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    st.metric(label="BTC Live Price", value=f"${price:,.2f}")
+with col2:
+    st.metric(label="24h High", value=f"${high:,.2f}")
+with col3:
+    st.metric(label="24h Low", value=f"${low:,.2f}")
+with col4:
+    st.metric(label="24h Volume", value=f"{vol:,.2f} BTC")
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# चार्ट और ऑर्डर फ्लो सेक्शन
+# ---------------------------------------------------------
+st.subheader("📊 Order Flow Depth & Pressure Analysis")
+
+# यदि बाइनेंस से बिड/आस्क का डेटा मिल गया है, तो उसे चार्ट में बदलें
+if bids and asks:
+    # डेटा को पांडास DataFrame में बदलना
+    bids_df = pd.DataFrame(bids, columns=['Price', 'Volume'])
+    bids_df['Price'] = bids_df['Price'].astype(float)
+    bids_df['Volume'] = bids_df['Volume'].astype(float)
+    bids_df['Type'] = 'Bid (Buy Pressure)'
     
-    # अगर किसी वजह से एपीआई फेच न हो पायी, तो फॉलबैक (डिफ़ॉल्ट सेफ वैल्यू) ताकि ऐप कभी बंद न हो
-    return {
-        "price": 67200.00,
-        "high": 68100.00,
-        "low": 66500.00,
-        "volume": 35420.50,
-        "price_change": 1.25
-    }
+    asks_df = pd.DataFrame(asks, columns=['Price', 'Volume'])
+    asks_df['Price'] = asks_df['Price'].astype(float)
+    asks_df['Volume'] = asks_df['Volume'].astype(float)
+    asks_df['Type'] = 'Ask (Sell Pressure)'
+    # सेल वॉल्यूम को नेगेटिव कर देते हैं ताकि दोनों तरफ बार चार्ट बंस सके
+    asks_df['Volume'] = -asks_df['Volume'] 
 
-# मुख्य डैशबोर्ड लेआउट
-placeholder = st.empty()
+    # दोनों को मर्ज करना
+    chart_df = pd.concat([bids_df, asks_df])
 
-with placeholder.container():
-    market_data = get_crypto_data()
+    # Plotly से हॉरिजॉन्टल बार चार्ट बनाना
+    fig = px.bar(
+        chart_df,
+        x='Volume',
+        y='Price',
+        color='Type',
+        orientation='h',
+        title='Bid vs Ask Order Flow Distribution',
+        color_discrete_map={'Bid (Buy Pressure)': '#00CC96', 'Ask (Sell Pressure)': '#EF553B'}
+    )
     
-    if market_data:
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Live BTC Price", f"${market_data['price']:,.2f}", f"{market_data['price_change']:.2f}%")
-        col2.metric("24h High", f"${market_data['high']:,.2f}")
-        col3.metric("24h Low", f"${market_data['low']:,.2f}")
-        col4.metric("24h Volume", f"{market_data['volume']:,.2f} BTC")
-        
-        st.success("✨ आर्डरफ्लो टर्मिनल पूरी तरह एक्टिव और लाइव है!")
-        
-        # आर्डरफ्लो / डेप्थ विजुलाइजेशन चार्ट
-        st.subheader("📊 Order Flow Depth & Pressure Analysis")
-        
-        current_p = market_data['price']
-        chart_data = pd.DataFrame({
-            'Price Level': [current_p - 150, current_p - 75, current_p, current_p + 75, current_p + 150],
-            'Buy Orders (Bid)': [140, 280, 450, 190, 95],
-            'Sell Orders (Ask)': [110, 210, 390, 310, 240]
-        })
-        
-        fig = go.Figure()
-        fig.add_trace(go.Bar(y=chart_data['Price Level'], x=chart_data['Buy Orders (Bid)'], name='Bid Pressure (Buy)', orientation='h', marker_color='#00FF7F'))
-        fig.add_trace(go.Bar(y=chart_data['Price Level'], x=[-x for x in chart_data['Sell Orders (Ask)']], name='Ask Pressure (Sell)', orientation='h', marker_color='#FF4500'))
-        
-        fig.update_layout(barmode='overlay', title="Bid vs Ask Order Flow Distribution", xaxis_title="Volume", yaxis_title="Price ($)", template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font_color='white',
+        xaxis_title="Volume",
+        yaxis_title="Price ($)",
+        yaxis=dict(autorange="reversed") # ऑर्डर बुक की तरह प्राइस ऊपर से नीचे अरेंज हो
+    )
 
-# ऑटो-रिफ्रेश काउंटर (हर 10 सेकंड में स्क्रीन अपडेट होगी)
-time.sleep(10)
-st.rerun()
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    # डमी चार्ट यदि API से तुरंत डेटा न मिले
+    st.warning("लाइव डेटा लोड हो रहा है...")
